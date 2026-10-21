@@ -1,0 +1,100 @@
+name: Diagnostic parcari Tineretului-Prieteniei
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Citeste locurile 262-309 din GIS
+        shell: bash
+        run: |
+          python - <<'PY'
+          import json
+          import sys
+          from urllib.parse import urlencode, quote
+          from urllib.request import Request, urlopen
+
+          ZONA = "Tineretului-Prieteniei"
+          LOCURI = set(range(262, 310))
+          GIS = (
+              "https://webadaptor.gisapp.ro/arcgisprod/rest/services/"
+              "ParcariSuceava/ParcariSuceava/MapServer/0/query"
+          )
+          where = (
+              "cod_zona = '" + ZONA + "' AND nr_loc IN ("
+              + ",".join("'" + str(i) + "'" for i in sorted(LOCURI))
+              + ")"
+          )
+          params = urlencode({
+              "f": "json",
+              "where": where,
+              "outFields": "OBJECTID,cod_zona,nr_loc,stare",
+              "returnGeometry": "false",
+          })
+          target = GIS + "?" + params
+          # Proxy-ul este cel folosit de pagina publica; incercam intai
+          # serviciul direct, apoi proxy-ul, fara autentificare sau tokenuri.
+          urls = [
+              ("direct", target),
+              ("proxy public", "https://parcari.primariasv.ro/proxy.jsp?"
+               + quote(target, safe=":/?&=%")),
+          ]
+          errors = []
+          for source, url in urls:
+              try:
+                  req = Request(url, headers={
+                      "Accept": "application/json",
+                      "User-Agent": "ParcariSuceavaDiagnostic/1.0",
+                      "Referer": "https://parcari.primariasv.ro/",
+                  })
+                  with urlopen(req, timeout=20) as response:
+                      raw = response.read(2_000_001)
+                      if len(raw) > 2_000_000:
+                          raise ValueError("Raspuns prea mare")
+                  data = json.loads(raw.decode("utf-8-sig"))
+                  if not isinstance(data, dict):
+                      raise ValueError("Raspunsul nu este obiect JSON")
+                  if "error" in data:
+                      raise ValueError("Eroare ArcGIS: " + str(data["error"].get("code", "?")))
+                  if data.get("exceededTransferLimit"):
+                      raise ValueError("Raspuns incomplet (exceededTransferLimit)")
+                  features = data.get("features")
+                  if not isinstance(features, list):
+                      raise ValueError("Nu exista campul features")
+                  found = {}
+                  for f in features:
+                      a = f.get("attributes") if isinstance(f, dict) else None
+                      if not isinstance(a, dict):
+                          continue
+                      if a.get("cod_zona") != ZONA:
+                          continue
+                      try:
+                          n = int(str(a.get("nr_loc", "")).strip())
+                      except ValueError:
+                          continue
+                      if n in LOCURI:
+                          found[n] = a.get("stare")
+                  if not found:
+                      raise ValueError("Nu au fost returnate locurile 262-309")
+                  print("Sursa accesibila:", source)
+                  print("Locuri gasite:", len(found), "din", len(LOCURI))
+                  for n in sorted(found):
+                      print(f"Loc {n}: stare={found[n]!r}")
+                  missing = sorted(LOCURI - found.keys())
+                  if missing:
+                      print("ATENTIE: lipsesc locurile:", ", ".join(map(str, missing)))
+                  print("DIAGNOSTIC OK: am primit date. Semnificatia codurilor stare nu este inca validata.")
+                  sys.exit(0)
+              except Exception as exc:
+                  errors.append(f"{source}: {type(exc).__name__}: {str(exc)[:150]}")
+          print("DIAGNOSTIC ESUAT: niciuna dintre surse nu a returnat locurile cerute.")
+          for err in errors:
+              print(" -", err)
+          sys.exit(1)
+          PY
