@@ -1,17 +1,13 @@
 name: Monitor parcari Tineretului-Prieteniei
-
 'on':
   workflow_dispatch:
   schedule:
     - cron: '*/5 * * * *'
-
 permissions:
   contents: write
-
 concurrency:
   group: monitor-parcari-prieteniei
   cancel-in-progress: false
-
 jobs:
   monitor:
     runs-on: ubuntu-latest
@@ -19,42 +15,37 @@ jobs:
     steps:
       - name: Descarca proiectul
         uses: actions/checkout@v4
-
       - name: Pregateste Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-
       - name: Instaleaza browserul
         run: |
           python -m pip install --disable-pip-version-check playwright
           python -m playwright install --with-deps chromium
-
-      - name: Verifica locurile 262-309 si trimite alerte
+      - name: Verifica locurile si trimite alerte
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
         run: python monitor_parcari.py
-
-      - name: Salveaza starea pentru urmatoarea verificare
+      - name: Salveaza starea
         run: |
-          test -f stare-parcari.json || (echo "Lipseste fisierul de stare" && exit 1)
+          test -f stare-parcari.json || (echo "Lipseste stare-parcari.json" && exit 1)
           git add stare-parcari.json
           if git diff --cached --quiet; then
-            echo "Nicio modificare de salvat"
-            exit 0
+            echo "Starea nu s-a modificat"
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git commit -m "Actualizare stare parcari"
+            git pull --rebase origin main
+            git push origin HEAD:main
           fi
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git commit -m "Actualizare stare parcari Tineretului-Prieteniei"
-          git pull --rebase origin main
-          git push origin HEAD:main
-
-      - name: Incarca diagnosticul daca apare o eroare
+      - name: Incarca raportul la eroare
         if: failure()
         uses: actions/upload-artifact@v4
         with:
-          name: diagnostic-monitor
+          name: raport-monitor
           path: raport-monitor/
           if-no-files-found: ignore
           retention-days: 2
