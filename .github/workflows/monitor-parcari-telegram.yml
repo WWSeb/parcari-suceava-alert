@@ -1,0 +1,107 @@
+          previous_saved_at = None
+          if state_path.exists():
+              try:
+                  state_obj = json.loads(state_path.read_text(encoding="utf-8"))
+                  prior = state_obj["stari"]
+                  if not isinstance(prior, dict) or set(prior) != set(current):
+                      raise ValueError("stari incomplete")
+                  if any(not isinstance(x, int) for x in prior.values()):
+                      raise ValueError("stari invalide")
+                  previous_saved_at = state_obj.get("ultima_salvare")
+              except (OSError, ValueError, KeyError, TypeError) as exc:
+                  raise SystemExit("Fisierul de stare este invalid. Nu se trimit alerte pana la remediere.") from None
+
+          available_now = [int(n) for n, st in current.items() if st == 1]
+          if prior is None:
+              if available_now:
+                  message = ("🟢 PARCARI DISPONIBILE la pornirea monitorizarii!\n"
+                             "Zona: Tineretului-Prieteniei\n"
+                             "Locuri: " + ", ".join(map(str, available_now)) + "\n"
+                             "https://parcari.primariasv.ro/")
+              else:
+                  message = ("✅ Monitorizare pornita: 48/48 locuri (262-309) verificate.\n"
+                             "Zona: Tineretului-Prieteniei\n"
+                             "Momentan nu exista locuri disponibile.")
+              print("Prima verificare: initializam starea.")
+          else:
+              new_green = [int(n) for n, st in current.items() if st == 1 and int(prior[n]) != 1]
+              if new_green:
+                  message = ("🟢 LOC DE PARCARE DISPONIBIL!\n"
+                             "Zona: Tineretului-Prieteniei\n"
+                             "Locuri devenite disponibile: " + ", ".join(map(str, new_green)) + "\n"
+                             "Verifica imediat pe: https://parcari.primariasv.ro/")
+                  print("Locuri nou disponibile:", new_green)
+              else:
+                  message = None
+                  print("Nu au aparut locuri noi disponibile. Nu trimitem mesaj.")
+
+          def send_telegram(text):
+              token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+              chat_id = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
+              if not token or not chat_id:
+                  raise SystemExit("Lipsesc TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID din GitHub Secrets.")
+              payload = urllib.parse.urlencode({"chat_id": chat_id, "text": text,
+                                                "disable_web_page_preview": "true"}).encode("utf-8")
+              request = urllib.request.Request(
+                  "https://api.telegram.org/bot" + token + "/sendMessage",
+                  data=payload, method="POST")
+              try:
+                  with urllib.request.urlopen(request, timeout=20) as res:
+                      result = json.loads(res.read().decode("utf-8"))
+                  if not result.get("ok"):
+                      raise RuntimeError("Raspuns Telegram fara confirmare")
+              except Exception as exc:
+                  # Nu includem URL-ul sau tokenul in jurnal.
+                  raise SystemExit("Notificarea Telegram a esuat: " + type(exc).__name__) from None
+              print("Mesaj Telegram trimis cu succes.")
+
+          if message:
+              send_telegram(message)
+
+          # Pastram un commit de activitate la fiecare ~21 zile, pentru a evita
+          # dezactivarea programarilor GitHub dupa perioade lungi fara activitate.
+          now = datetime.now(timezone.utc)
+          heartbeat_due = True
+          if previous_saved_at:
+              try:
+                  saved_at = datetime.fromisoformat(previous_saved_at)
+                  heartbeat_due = now - saved_at >= timedelta(days=21)
+              except (ValueError, TypeError):
+                  heartbeat_due = True
+
+          # Salvam DOAR dupa verificarea tuturor locurilor si notificarea reusita.
+          # Daca nimic nu s-a schimbat, nu facem commit la fiecare 5 minute.
+          if prior is None or current != prior or heartbeat_due:
+              new_state = {
+                  "zona": "Tineretului-Prieteniei",
+                  "stari": current,
+                  "ultima_salvare": now.isoformat(timespec="seconds"),
+              }
+              state_path.write_text(json.dumps(new_state, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+              print("Starea a fost pregatita pentru salvare in repository.")
+          else:
+              print("Nicio schimbare. Starea din repository ramane neschimbata.")
+          PY
+
+      - name: Salveaza starea pentru urmatoarea verificare
+        shell: bash
+        run: |
+          git add stare-parcari.json
+          if git diff --cached --quiet; then
+            echo "Starea nu s-a schimbat. Nu este nevoie de commit."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "Actualizare stari locuri Tineretului-Prieteniei"
+          git pull --rebase origin main
+          git push origin HEAD:main
+
+      - name: Salveaza diagnosticul daca apare o eroare
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: diagnostic-monitor
+          path: raport-monitor/
+          if-no-files-found: ignore
+          retention-days: 2
