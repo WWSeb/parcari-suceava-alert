@@ -102,56 +102,59 @@ jobs:
               pending.add(task)
               task.add_done_callback(pending.discard)
 
-          async with async_playwright() as playwright:
-              browser = await playwright.chromium.launch(headless=True)
-              context = await browser.new_context(locale="ro-RO", viewport={"width": 1440, "height": 900})
-              context.on("response", on_response)
-              page = await context.new_page()
-              try:
-                  await page.goto(SITE, wait_until="domcontentloaded", timeout=45000)
-                  await page.wait_for_timeout(3500)
-                  print("Pagina principala:", short_address(page.url))
+          async def main():
+              async with async_playwright() as playwright:
+                  browser = await playwright.chromium.launch(headless=True)
+                  context = await browser.new_context(locale="ro-RO", viewport={"width": 1440, "height": 900})
+                  context.on("response", on_response)
+                  page = await context.new_page()
+                  try:
+                      await page.goto(SITE, wait_until="domcontentloaded", timeout=45000)
+                      await page.wait_for_timeout(3500)
+                      print("Pagina principala:", short_address(page.url))
 
-                  # Cautam doar butoane/linkuri publice pentru accesarea hartii.
-                  candidates = []
-                  for frame in page.frames:
-                      elements = frame.locator("a, button, [role='button']")
-                      count = min(await elements.count(), 250)
-                      for i in range(count):
-                          el = elements.nth(i)
+                      # Cautam doar butoane/linkuri publice pentru accesarea hartii.
+                      candidates = []
+                      for frame in page.frames:
+                          elements = frame.locator("a, button, [role='button']")
+                          count = min(await elements.count(), 250)
+                          for i in range(count):
+                              el = elements.nth(i)
+                              try:
+                                  title = (await el.inner_text(timeout=1500)).strip()
+                                  desc = (await el.get_attribute("aria-label") or "")
+                                  name = (title + " " + desc).strip()
+                                  if re.search(r"hart[aă]|map[aă]", name, flags=re.I):
+                                      weight = 0 if re.search(r"parc[aă]r", name, flags=re.I) else 1
+                                      candidates.append((weight, name[:90], el))
+                              except Exception:
+                                  pass
+                      candidates.sort(key=lambda x: x[0])
+                      print("Butoane de harta gasite:", [name for _, name, _ in candidates[:8]])
+                      for _, name, element in candidates[:4]:
                           try:
-                              title = (await el.inner_text(timeout=1500)).strip()
-                              desc = (await el.get_attribute("aria-label") or "")
-                              name = (title + " " + desc).strip()
-                              if re.search(r"hart[aă]|map[aă]", name, flags=re.I):
-                                  weight = 0 if re.search(r"parc[aă]r", name, flags=re.I) else 1
-                                  candidates.append((weight, name[:90], el))
-                          except Exception:
-                              pass
-                  candidates.sort(key=lambda x: x[0])
-                  print("Butoane de harta gasite:", [name for _, name, _ in candidates[:8]])
-                  for _, name, element in candidates[:4]:
-                      try:
-                          await element.click(timeout=6500)
-                          print("Am apasat butonul:", name)
-                          break
-                      except Exception as exc:
-                          errors.append(f"Click harta: {type(exc).__name__}")
+                              await element.click(timeout=6500)
+                              print("Am apasat butonul:", name)
+                              break
+                          except Exception as exc:
+                              errors.append(f"Click harta: {type(exc).__name__}")
 
-                  await page.wait_for_timeout(16000)
-                  # Unele harti se deschid in tab nou sau intr-un iframe.
-                  for idx, p in enumerate(context.pages[:4]):
-                      print("Pagina deschisa:", short_address(p.url))
-                      try:
-                          await p.screenshot(path=str(OUTPUT / f"pagina-{idx}.png"), full_page=False, timeout=15000)
-                      except Exception as exc:
-                          errors.append(f"Screenshot pagina {idx}: {type(exc).__name__}")
-                  print("Cadre iframe:", [short_address(fr.url) for fr in page.frames[:10]])
-              except Exception as exc:
-                  errors.append(f"Navigare site: {type(exc).__name__}: {str(exc)[:100]}")
-              if pending:
-                  await asyncio.gather(*list(pending), return_exceptions=True)
-              await browser.close()
+                      await page.wait_for_timeout(16000)
+                      # Unele harti se deschid in tab nou sau intr-un iframe.
+                      for idx, p in enumerate(context.pages[:4]):
+                          print("Pagina deschisa:", short_address(p.url))
+                          try:
+                              await p.screenshot(path=str(OUTPUT / f"pagina-{idx}.png"), full_page=False, timeout=15000)
+                          except Exception as exc:
+                              errors.append(f"Screenshot pagina {idx}: {type(exc).__name__}")
+                      print("Cadre iframe:", [short_address(fr.url) for fr in page.frames[:10]])
+                  except Exception as exc:
+                      errors.append(f"Navigare site: {type(exc).__name__}: {str(exc)[:100]}")
+                  if pending:
+                      await asyncio.gather(*list(pending), return_exceptions=True)
+                  await browser.close()
+
+          asyncio.run(main())
 
           found = [seen[k] for k in sorted(seen)]
           print("Cereri GIS observate:", request_counts["gis"])
