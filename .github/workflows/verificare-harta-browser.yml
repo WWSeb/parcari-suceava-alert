@@ -1,0 +1,180 @@
+name: Diagnostic harta publica Parcari Suceava
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  browser-diagnostic:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Pregateste Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Instaleaza browserul automat
+        run: |
+          python -m pip install --disable-pip-version-check playwright
+          python -m playwright install --with-deps chromium
+
+      - name: Deschide harta publica si inspecteaza datele afisate
+        shell: bash
+        run: |
+          python - <<'PY'
+          import asyncio
+          import json
+          import re
+          from pathlib import Path
+          from urllib.parse import urlsplit
+          from playwright.async_api import async_playwright
+
+          SITE = "https://parcari.primariasv.ro/"
+          ZONA = "tineretului-prieteniei"
+          LOCURI = set(range(262, 310))
+          OUTPUT = Path("raport-harta")
+          OUTPUT.mkdir(exist_ok=True)
+          seen = {}
+          request_counts = {"gis": 0, "json_gis": 0, "arcgis_error": 0}
+          pending = set()
+          errors = []
+
+          def short_address(address):
+              # Nu afisam URL-uri complete: pot contine tokenuri sau parametri privati.
+              p = urlsplit(address)
+              return f"{p.scheme}://{p.netloc}{p.path}"
+
+          def scan_json(data):
+              if not isinstance(data, dict):
+                  return
+              if isinstance(data.get("features"), list):
+                  for feature in data["features"]:
+                      if not isinstance(feature, dict):
+                          continue
+                      attr = feature.get("attributes", {})
+                      if not isinstance(attr, dict):
+                          continue
+                      zona = str(attr.get("cod_zona", "")).strip().lower()
+                      if zona != ZONA:
+                          continue
+                      try:
+                          nr = int(str(attr.get("nr_loc", "")).strip())
+                      except (ValueError, TypeError):
+                          continue
+                      if nr in LOCURI:
+                          seen[nr] = {
+                              "nr_loc": nr,
+                              "cod_zona": attr.get("cod_zona"),
+                              "stare": attr.get("stare"),
+                              "OBJECTID": attr.get("OBJECTID"),
+                          }
+              for key, value in data.items():
+                  if key == "features":
+                      continue
+                  if isinstance(value, dict):
+                      scan_json(value)
+
+          async def inspect_response(response):
+              url = response.url.lower()
+              if not any(piece in url for piece in ("proxy.jsp", "/query?", "/query/")):
+                  return
+              request_counts["gis"] += 1
+              if response.status != 200:
+                  return
+              try:
+                  raw = await response.body()
+                  if len(raw) > 5_000_000:
+                      return
+                  data = json.loads(raw)
+              except Exception:
+                  return
+              if isinstance(data, dict):
+                  request_counts["json_gis"] += 1
+                  if "error" in data:
+                      request_counts["arcgis_error"] += 1
+                  scan_json(data)
+
+          def on_response(response):
+              task = asyncio.create_task(inspect_response(response))
+              pending.add(task)
+              task.add_done_callback(pending.discard)
+
+          async with async_playwright() as playwright:
+              browser = await playwright.chromium.launch(headless=True)
+              context = await browser.new_context(locale="ro-RO", viewport={"width": 1440, "height": 900})
+              context.on("response", on_response)
+              page = await context.new_page()
+              try:
+                  await page.goto(SITE, wait_until="domcontentloaded", timeout=45000)
+                  await page.wait_for_timeout(3500)
+                  print("Pagina principala:", short_address(page.url))
+
+                  # Cautam doar butoane/linkuri publice pentru accesarea hartii.
+                  candidates = []
+                  for frame in page.frames:
+                      elements = frame.locator("a, button, [role='button']")
+                      count = min(await elements.count(), 250)
+                      for i in range(count):
+                          el = elements.nth(i)
+                          try:
+                              title = (await el.inner_text(timeout=1500)).strip()
+                              desc = (await el.get_attribute("aria-label") or "")
+                              name = (title + " " + desc).strip()
+                              if re.search(r"hart[aă]|map[aă]", name, flags=re.I):
+                                  weight = 0 if re.search(r"parc[aă]r", name, flags=re.I) else 1
+                                  candidates.append((weight, name[:90], el))
+                          except Exception:
+                              pass
+                  candidates.sort(key=lambda x: x[0])
+                  print("Butoane de harta gasite:", [name for _, name, _ in candidates[:8]])
+                  for _, name, element in candidates[:4]:
+                      try:
+                          await element.click(timeout=6500)
+                          print("Am apasat butonul:", name)
+                          break
+                      except Exception as exc:
+                          errors.append(f"Click harta: {type(exc).__name__}")
+
+                  await page.wait_for_timeout(16000)
+                  # Unele harti se deschid in tab nou sau intr-un iframe.
+                  for idx, p in enumerate(context.pages[:4]):
+                      print("Pagina deschisa:", short_address(p.url))
+                      try:
+                          await p.screenshot(path=str(OUTPUT / f"pagina-{idx}.png"), full_page=False, timeout=15000)
+                      except Exception as exc:
+                          errors.append(f"Screenshot pagina {idx}: {type(exc).__name__}")
+                  print("Cadre iframe:", [short_address(fr.url) for fr in page.frames[:10]])
+              except Exception as exc:
+                  errors.append(f"Navigare site: {type(exc).__name__}: {str(exc)[:100]}")
+              if pending:
+                  await asyncio.gather(*list(pending), return_exceptions=True)
+              await browser.close()
+
+          found = [seen[k] for k in sorted(seen)]
+          print("Cereri GIS observate:", request_counts["gis"])
+          print("Raspunsuri GIS JSON:", request_counts["json_gis"])
+          print("Raspunsuri GIS cu eroare:", request_counts["arcgis_error"])
+          print("Locuri gasite intre 262 si 309:", len(found), "din 48")
+          for item in found:
+              print(f"Loc {item['nr_loc']}: stare={item['stare']}")
+          if not found:
+              print("Nu au fost incarcate locurile cautate. Nu sunt activate alerte.")
+              print("Verifica captura de ecran din artefact pentru a vedea unde a ajuns browserul.")
+          if errors:
+              print("Observatii:", "; ".join(errors[:6]))
+          with (OUTPUT / "diagnostic.json").open("w", encoding="utf-8") as file:
+              json.dump({"cereri": request_counts, "locuri": found, "observatii": errors}, file,
+                        ensure_ascii=False, indent=2)
+          PY
+
+      - name: Salveaza capturile pentru diagnostic
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rezultat-harta
+          path: raport-harta/
+          if-no-files-found: warn
+          retention-days: 1
