@@ -1,0 +1,46 @@
+name: Test notificare Telegram
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trimite mesaj de test
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          token = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+          chat_id = os.environ.get("TELEGRAM_CHAT_ID", "")
+          if not token or not chat_id:
+              raise SystemExit("Lipsesc TELEGRAM_BOT_TOKEN sau TELEGRAM_CHAT_ID din GitHub Secrets.")
+
+          url = f"https://api.telegram.org/bot{token}/sendMessage"
+          payload = json.dumps({
+              "chat_id": chat_id,
+              "text": "✅ Test reușit! Botul pentru parcările Tineretului–Prieteniei poate trimite notificări."
+          }).encode("utf-8")
+          request = urllib.request.Request(
+              url,
+              data=payload,
+              headers={"Content-Type": "application/json"},
+              method="POST",
+          )
+          try:
+              with urllib.request.urlopen(request, timeout=20) as response:
+                  result = json.load(response)
+          except urllib.error.HTTPError as e:
+              # Avoid logging the bot-token-bearing URL.
+              raise SystemExit(f"Telegram a refuzat trimiterea (HTTP {e.code}). Verifică tokenul și CHAT_ID.")
+          if not result.get("ok"):
+              raise SystemExit("Telegram nu a confirmat trimiterea mesajului.")
+          print("Mesajul de test a fost trimis.")
+          PY
