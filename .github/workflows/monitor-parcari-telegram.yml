@@ -27,7 +27,7 @@ jobs:
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
-        run: python monitor_parcari.py
+        run: python .github/workflows/monitor_parcari.py
       - name: Salveaza starea
         run: |
           test -f stare-parcari.json || (echo "Lipseste stare-parcari.json" && exit 1)
